@@ -1,0 +1,7 @@
+.idea/
+bin/
+datasets/
+lib/
+lib64
+logs/
+pyvenv.cfg

@@ -1,0 +1,7 @@
+psutil
+tabulate
+numpy
+opencv-python
+tqdm
+opencv-python
+termcolor
