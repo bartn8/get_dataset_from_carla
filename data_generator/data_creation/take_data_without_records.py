@@ -140,23 +140,32 @@ def take_data_backbone(carla_egg_path, town_id, rpc_port, job_id, ego_vehicle_fo
         carla.Rotation(pitch=0.0, roll=0.0, yaw=0.0)
     )
 
+    camera_fov = 90.0
+
     # RGB CAMERAS
     camera_bp = bp_lib.find("sensor.camera.rgb")
-    camera_bp.set_attribute("fov", "90")
+    camera_bp.set_attribute("fov", str(camera_fov))
     camera_bp.set_attribute("image_size_x", f"{IMAGE_W}")
     camera_bp.set_attribute("image_size_y", f"{IMAGE_H}")
 
     # DEPTH CAMERAS
     depth_bp = bp_lib.find("sensor.camera.depth")
-    depth_bp.set_attribute("fov", "90")
+    depth_bp.set_attribute("fov", str(camera_fov))
     depth_bp.set_attribute("image_size_x", f"{IMAGE_W}")
     depth_bp.set_attribute("image_size_y", f"{IMAGE_H}")
 
     # NORMAL CAMERAS
     normal_bp = bp_lib.find("sensor.camera.normals")
-    normal_bp.set_attribute("fov", "90")
+    normal_bp.set_attribute("fov", str(camera_fov))
     normal_bp.set_attribute("image_size_x", f"{IMAGE_W}")
     normal_bp.set_attribute("image_size_y", f"{IMAGE_H}")
+
+    K_camera = np.eye(3)
+    K_camera[0, 2] = IMAGE_W / 2
+    K_camera[1, 2] = IMAGE_H / 2
+    K_camera[0, 0] = K_camera[1, 1] = IMAGE_W / (2.0 * math.tan(math.radians(camera_fov) / 2.0))
+
+    np.savetxt(os.path.join(where_to_save, "K_camera.txt"), K_camera)
 
     transformations = []
 
@@ -169,6 +178,8 @@ def take_data_backbone(carla_egg_path, town_id, rpc_port, job_id, ego_vehicle_fo
                                            carla.Rotation(pitch=0.0, roll=0, yaw=180)))
     transformations.append(carla.Transform(carla.Location(x=+0.0, y=1.0, z=2.0),
                                            carla.Rotation(pitch=-5.0, roll=0, yaw=270)))
+    
+    #TODO: get extrinsics from Carla
 
     sensors = {}
 
