@@ -5,3 +5,4 @@ lib/
 lib64
 logs/
 pyvenv.cfg
+*.pyc

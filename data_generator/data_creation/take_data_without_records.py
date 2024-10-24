@@ -32,11 +32,14 @@ def take_data_backbone(carla_egg_path, town_id, rpc_port, job_id, ego_vehicle_fo
     if lateral_cameras:
         cameras_indexes.append(1)
         cameras_indexes.append(3)
+
+    lidar_indexes = [16, 32, 64, 128]
+
     global ALREADY_OBTAINED_DATA_FROM_SENSOR
     ALREADY_OBTAINED_DATA_FROM_SENSOR = {f"rgb_{i}": False for i in cameras_indexes}
-    ALREADY_OBTAINED_DATA_FROM_SENSOR = dict({f"depth_{i}": False for i in cameras_indexes},
-                                               **ALREADY_OBTAINED_DATA_FROM_SENSOR)
-    ALREADY_OBTAINED_DATA_FROM_SENSOR = dict({"lidar": False}, **ALREADY_OBTAINED_DATA_FROM_SENSOR)
+    ALREADY_OBTAINED_DATA_FROM_SENSOR = dict({f"depth_{i}": False for i in cameras_indexes}, **ALREADY_OBTAINED_DATA_FROM_SENSOR)
+    ALREADY_OBTAINED_DATA_FROM_SENSOR = dict({f"normals_{i}": False for i in cameras_indexes}, **ALREADY_OBTAINED_DATA_FROM_SENSOR)
+    ALREADY_OBTAINED_DATA_FROM_SENSOR = dict({f"lidar_{i}": False for i in lidar_indexes}, **ALREADY_OBTAINED_DATA_FROM_SENSOR)
 
     # Connect the client and set up bp library
     client = carla.Client('localhost', rpc_port)
@@ -75,17 +78,13 @@ def take_data_backbone(carla_egg_path, town_id, rpc_port, job_id, ego_vehicle_fo
     world.set_weather(a_random_weather)
 
     # LIDAR callback
-    def lidar_callback(data):
+    def lidar_callback(data, number):
         if not DISABLE_ALL_SENSORS and (data.frame - STARTING_FRAME) % AMOUNT_OF_CARLA_FRAME_AFTER_WE_SAVE == 0:
             lidar_data_raw = np.copy(np.frombuffer(data.raw_data, dtype=np.dtype('f4')))
-            lidar_data_raw = np.reshape(lidar_data_raw, (int(lidar_data_raw.shape[0] / 4), 4))
-
-            # MY LIDAR
-            lidar_data = lidar_to_histogram_features(lidar_data_raw[:, :3])[0]
-            lidar_data = np.rot90(lidar_data)
+            lidar_data_raw = np.reshape(lidar_data_raw, (int(lidar_data_raw.shape[0] / 4), 4))            
             saved_frame = (data.frame - STARTING_FRAME) // AMOUNT_OF_CARLA_FRAME_AFTER_WE_SAVE
-            cv2.imwrite(os.path.join(PATHS["lidar"], f"{saved_frame}.png"), lidar_data)
-            ALREADY_OBTAINED_DATA_FROM_SENSOR["lidar"] = True
+            np.savez_compressed(os.path.join(PATHS[f"lidar_{number}"], f"{saved_frame}.npz"), lidar_data_raw=lidar_data_raw)
+            ALREADY_OBTAINED_DATA_FROM_SENSOR[f"lidar_{number}"] = True
 
     # CAMERAS callback
     def rgb_callback(data, number):
@@ -98,26 +97,47 @@ def take_data_backbone(carla_egg_path, town_id, rpc_port, job_id, ego_vehicle_fo
     # DEPTH callback
     def depth_callback(data, number):
         if not DISABLE_ALL_SENSORS and (data.frame - STARTING_FRAME) % AMOUNT_OF_CARLA_FRAME_AFTER_WE_SAVE == 0:
-            data.convert(carla.ColorConverter.LogarithmicDepth)
             depth = np.reshape(np.copy(data.raw_data), (data.height, data.width, 4))
-            depth = depth[:, :, 0]
+            depth = depth[:, :, :3]
+            depth = depth[:, :, ::-1]
+            R, G, B = depth[:, :, 0], depth[:, :, 1], depth[:, :, 2]
+            depth_normalized = ((R + G * 256.0 + B * 256.0 * 256.0) / (256.0 * 256.0 * 256.0 - 1.0))
             saved_frame = (data.frame - STARTING_FRAME) // AMOUNT_OF_CARLA_FRAME_AFTER_WE_SAVE
-            cv2.imwrite(os.path.join(PATHS[f"depth_{number}"], f"{saved_frame}.png"), depth)
+            cv2.imwrite(os.path.join(PATHS[f"depth_{number}"], f"{saved_frame}.png"), (65535.0*depth_normalized).astype(np.uint16))
             ALREADY_OBTAINED_DATA_FROM_SENSOR[f"depth_{number}"] = True
 
+    # NORMALS callback
+    def normals_callback(data, number):
+        if not DISABLE_ALL_SENSORS and (data.frame - STARTING_FRAME) % AMOUNT_OF_CARLA_FRAME_AFTER_WE_SAVE == 0:
+            normals = np.reshape(np.copy(data.raw_data), (data.height, data.width, 4))
+            normals = normals[:, :, :3]
+            normals = normals[:, :, ::-1]
+            saved_frame = (data.frame - STARTING_FRAME) // AMOUNT_OF_CARLA_FRAME_AFTER_WE_SAVE
+            cv2.imwrite(os.path.join(PATHS[f"normals_{number}"], f"{saved_frame}.png"), cv2.cvtColor(normals, cv2.COLOR_RGB2BGR))
+            ALREADY_OBTAINED_DATA_FROM_SENSOR[f"normals_{number}"] = True
 
     # LIDAR
+    def calculate_lidar_points_per_second(lidar_freq, lidar_channels, h_angle_res_degree):
+        return round(lidar_freq * lidar_channels * (360.0 / h_angle_res_degree))
+
+    lidar_freq_list = [10.0, 10.0, 10.0, 10.0]
+    lidar_channels_list = [16.0, 32.0, 64.0, 128.0]
+    h_angle_res_degree_list = [0.18, 0.18, 0.18, 0.18]
+
+    assert len(lidar_indexes) == len(lidar_freq_list) == len(lidar_channels_list) == len(h_angle_res_degree_list)
+
     lidar_bp = bp_lib.find('sensor.lidar.ray_cast')
     lidar_bp.set_attribute('range', '100.0')
     lidar_bp.set_attribute('noise_stddev', '0.0')
-    lidar_bp.set_attribute('upper_fov', '0.0')
-    lidar_bp.set_attribute('lower_fov', '-25.0')
-    lidar_bp.set_attribute('channels', '32.0')
-    lidar_bp.set_attribute('rotation_frequency', '20.0')
-    lidar_bp.set_attribute('points_per_second', '600000')
+    lidar_bp.set_attribute('upper_fov', '31.0')
+    lidar_bp.set_attribute('lower_fov', '-16.0')
+    # lidar_bp.set_attribute('channels', f'{lidar_channels:.1f}')
+    # lidar_bp.set_attribute('rotation_frequency', f'{lidar_freq:.1f}')
+    # lidar_bp.set_attribute('points_per_second', str(calculate_lidar_points_per_second(lidar_freq, lidar_channels, h_angle_res_degree)))
+
     lidar_init_trans = carla.Transform(
-        carla.Location(x=0, y=0, z=2.5),
-        carla.Rotation(pitch=0, roll=0, yaw=0)
+        carla.Location(x=1.0, y=0, z=2.0),
+        carla.Rotation(pitch=0.0, roll=0.0, yaw=0.0)
     )
 
     # RGB CAMERAS
@@ -132,6 +152,12 @@ def take_data_backbone(carla_egg_path, town_id, rpc_port, job_id, ego_vehicle_fo
     depth_bp.set_attribute("image_size_x", f"{IMAGE_W}")
     depth_bp.set_attribute("image_size_y", f"{IMAGE_H}")
 
+    # NORMAL CAMERAS
+    normal_bp = bp_lib.find("sensor.camera.normals")
+    normal_bp.set_attribute("fov", "90")
+    normal_bp.set_attribute("image_size_x", f"{IMAGE_W}")
+    normal_bp.set_attribute("image_size_y", f"{IMAGE_H}")
+
     transformations = []
 
     # Obvious CAMERAS
@@ -145,33 +171,54 @@ def take_data_backbone(carla_egg_path, town_id, rpc_port, job_id, ego_vehicle_fo
                                            carla.Rotation(pitch=-5.0, roll=0, yaw=270)))
 
     sensors = {}
-    sensors["lidar"] = world.spawn_actor(lidar_bp, lidar_init_trans, attach_to=hero)
+
+    for i in range(len(lidar_indexes)):
+        lidar_freq = lidar_freq_list[i]
+        lidar_channels = lidar_channels_list[i]
+        h_angle_res_degree = h_angle_res_degree_list[i]
+
+        lidar_bp.set_attribute('channels', f'{lidar_channels:.1f}')
+        lidar_bp.set_attribute('rotation_frequency', f'{lidar_freq:.1f}')
+        lidar_bp.set_attribute('points_per_second', str(calculate_lidar_points_per_second(lidar_freq, lidar_channels, h_angle_res_degree)))
+
+        sensors[f"lidar_{lidar_indexes[i]}"] = world.spawn_actor(lidar_bp, lidar_init_trans, attach_to=hero)
+
     for i in cameras_indexes:
         sensors[f"rgb_{i}"] = world.spawn_actor(camera_bp, transformations[i], attach_to=hero)
         sensors[f"depth_{i}"] = world.spawn_actor(depth_bp, transformations[i], attach_to=hero)
+        sensors[f"normals_{i}"] = world.spawn_actor(normal_bp, transformations[i], attach_to=hero)
 
     # Connect Sensor and Callbacks
-    sensors["lidar"].listen(lambda data: lidar_callback(data))
+    for i in lidar_indexes:
+        sensors[f"lidar_{i}"].listen(lambda scan, j=i: lidar_callback(scan, j))
 
     for i in cameras_indexes:
         sensors[f"rgb_{i}"].listen(lambda image, j=i: rgb_callback(image, j))
         sensors[f"depth_{i}"].listen(lambda depth, j=i: depth_callback(depth, j))
+        sensors[f"normals_{i}"].listen(lambda normals, j=i: normals_callback(normals, j))
 
+    lidar_folders_name = [f"lidar_{i}" for i in lidar_indexes]
     rgb_folders_name = [f"rgb_{i}" for i in cameras_indexes]
     depth_folders_name = [f"depth_{i}" for i in cameras_indexes]
+    normal_folders_name = [f"normals_{i}" for i in cameras_indexes]
 
     global PATHS
-    PATHS["lidar"] = os.path.join(where_to_save, "bev_lidar")
-    for i in cameras_indexes:
-        PATHS[f"rgb_{i}"] = os.path.join(where_to_save, rgb_folders_name[i])
-        PATHS[f"depth_{i}"] = os.path.join(where_to_save, depth_folders_name[i])
+    
+    for i in range(len(lidar_indexes)):
+        PATHS[f"lidar_{lidar_indexes[i]}"] = os.path.join(where_to_save, lidar_folders_name[i])
+
+    for i in range(len(cameras_indexes)):
+        PATHS[f"rgb_{cameras_indexes[i]}"] = os.path.join(where_to_save, rgb_folders_name[i])
+        PATHS[f"depth_{cameras_indexes[i]}"] = os.path.join(where_to_save, depth_folders_name[i])
+        PATHS[f"normals_{cameras_indexes[i]}"] = os.path.join(where_to_save, normal_folders_name[i])
 
     for key_path in PATHS:
         os.mkdir(PATHS[key_path])
 
     def cntrl_c(_, __):
-        sensors["lidar"].stop()
-        sensors["lidar"].destroy()
+        for i in lidar_indexes:
+            sensors[f"lidar_{i}"].stop()
+            sensors[f"lidar_{i}"].destroy()
         for i in cameras_indexes:
             sensors[f"rgb_{i}"].stop()
             sensors[f"rgb_{i}"].destroy()
