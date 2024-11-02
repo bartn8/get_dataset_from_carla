@@ -39,6 +39,7 @@ def take_data_backbone(carla_egg_path, town_id, rpc_port, job_id, ego_vehicle_fo
     ALREADY_OBTAINED_DATA_FROM_SENSOR = {f"rgb_{i}": False for i in cameras_indexes}
     ALREADY_OBTAINED_DATA_FROM_SENSOR = dict({f"depth_{i}": False for i in cameras_indexes}, **ALREADY_OBTAINED_DATA_FROM_SENSOR)
     ALREADY_OBTAINED_DATA_FROM_SENSOR = dict({f"normals_{i}": False for i in cameras_indexes}, **ALREADY_OBTAINED_DATA_FROM_SENSOR)
+    ALREADY_OBTAINED_DATA_FROM_SENSOR = dict({f"semantic_{i}": False for i in cameras_indexes}, **ALREADY_OBTAINED_DATA_FROM_SENSOR)
     ALREADY_OBTAINED_DATA_FROM_SENSOR = dict({f"lidar_{i}": False for i in lidar_indexes}, **ALREADY_OBTAINED_DATA_FROM_SENSOR)
 
     # Connect the client and set up bp library
@@ -112,17 +113,32 @@ def take_data_backbone(carla_egg_path, town_id, rpc_port, job_id, ego_vehicle_fo
             normals = np.reshape(np.copy(data.raw_data), (data.height, data.width, 4))
             normals = normals[:, :, :3]
             normals = normals[:, :, ::-1]
+
+            normals[:, :, 2] = ((normals[:, :, 2] / 255.0) * 127.0 + 128.0).astype(normals.dtype)
+
             saved_frame = (data.frame - STARTING_FRAME) // AMOUNT_OF_CARLA_FRAME_AFTER_WE_SAVE
             cv2.imwrite(os.path.join(PATHS[f"normals_{number}"], f"{saved_frame}.png"), cv2.cvtColor(normals, cv2.COLOR_RGB2BGR))
             ALREADY_OBTAINED_DATA_FROM_SENSOR[f"normals_{number}"] = True
+
+    # SEMANTIC SEGMENTATION callback
+    def semantic_segmentation_callback(data, number):
+        if not DISABLE_ALL_SENSORS and (data.frame - STARTING_FRAME) % AMOUNT_OF_CARLA_FRAME_AFTER_WE_SAVE == 0:
+            semantic_map = np.reshape(np.copy(data.raw_data), (data.height, data.width, 4))
+            semantic_map = semantic_map[:, :, :3]
+            semantic_map = semantic_map[:, :, ::-1]
+            semantic_map = semantic_map[:, :, 0]            
+
+            saved_frame = (data.frame - STARTING_FRAME) // AMOUNT_OF_CARLA_FRAME_AFTER_WE_SAVE
+            cv2.imwrite(os.path.join(PATHS[f"semantic_{number}"], f"{saved_frame}.png"), cv2.cvtColor(semantic_map, cv2.COLOR_GRAY2BGR))
+            ALREADY_OBTAINED_DATA_FROM_SENSOR[f"semantic_{number}"] = True
 
     # LIDAR
     def calculate_lidar_points_per_second(lidar_freq, lidar_channels, h_angle_res_degree):
         return round(lidar_freq * lidar_channels * (360.0 / h_angle_res_degree))
 
-    lidar_freq_list = [10.0, 10.0, 10.0, 10.0]
+    lidar_freq_list = [CARLA_FPS] * 4
     lidar_channels_list = [16.0, 32.0, 64.0, 128.0]
-    h_angle_res_degree_list = [0.18, 0.18, 0.18, 0.18]
+    h_angle_res_degree_list = [0.18] * 4
 
     assert len(lidar_indexes) == len(lidar_freq_list) == len(lidar_channels_list) == len(h_angle_res_degree_list)
 
@@ -159,6 +175,12 @@ def take_data_backbone(carla_egg_path, town_id, rpc_port, job_id, ego_vehicle_fo
     normal_bp.set_attribute("fov", str(camera_fov))
     normal_bp.set_attribute("image_size_x", f"{IMAGE_W}")
     normal_bp.set_attribute("image_size_y", f"{IMAGE_H}")
+
+    # SEMANTIC SEGMENTATION CAMERAS
+    semantic_bp = bp_lib.find("sensor.camera.semantic_segmentation")
+    semantic_bp.set_attribute("fov", str(camera_fov))
+    semantic_bp.set_attribute("image_size_x", f"{IMAGE_W}")
+    semantic_bp.set_attribute("image_size_y", f"{IMAGE_H}")
 
     K_camera = np.eye(3)
     K_camera[0, 2] = IMAGE_W / 2
@@ -198,6 +220,7 @@ def take_data_backbone(carla_egg_path, town_id, rpc_port, job_id, ego_vehicle_fo
         sensors[f"rgb_{i}"] = world.spawn_actor(camera_bp, transformations[i], attach_to=hero)
         sensors[f"depth_{i}"] = world.spawn_actor(depth_bp, transformations[i], attach_to=hero)
         sensors[f"normals_{i}"] = world.spawn_actor(normal_bp, transformations[i], attach_to=hero)
+        sensors[f"semantic_{i}"] = world.spawn_actor(semantic_bp, transformations[i], attach_to=hero)
 
     # Connect Sensor and Callbacks
     for i in lidar_indexes:
@@ -207,11 +230,13 @@ def take_data_backbone(carla_egg_path, town_id, rpc_port, job_id, ego_vehicle_fo
         sensors[f"rgb_{i}"].listen(lambda image, j=i: rgb_callback(image, j))
         sensors[f"depth_{i}"].listen(lambda depth, j=i: depth_callback(depth, j))
         sensors[f"normals_{i}"].listen(lambda normals, j=i: normals_callback(normals, j))
+        sensors[f"semantic_{i}"].listen(lambda semantic, j=i: semantic_segmentation_callback(semantic, j))
 
     lidar_folders_name = [f"lidar_{i}" for i in lidar_indexes]
     rgb_folders_name = [f"rgb_{i}" for i in cameras_indexes]
     depth_folders_name = [f"depth_{i}" for i in cameras_indexes]
     normal_folders_name = [f"normals_{i}" for i in cameras_indexes]
+    semantic_folders_name = [f"semantic_{i}" for i in cameras_indexes]
 
     global PATHS
     
@@ -222,6 +247,7 @@ def take_data_backbone(carla_egg_path, town_id, rpc_port, job_id, ego_vehicle_fo
         PATHS[f"rgb_{cameras_indexes[i]}"] = os.path.join(where_to_save, rgb_folders_name[i])
         PATHS[f"depth_{cameras_indexes[i]}"] = os.path.join(where_to_save, depth_folders_name[i])
         PATHS[f"normals_{cameras_indexes[i]}"] = os.path.join(where_to_save, normal_folders_name[i])
+        PATHS[f"semantic_{cameras_indexes[i]}"] = os.path.join(where_to_save, semantic_folders_name[i])
 
     for key_path in PATHS:
         os.mkdir(PATHS[key_path])
@@ -235,6 +261,10 @@ def take_data_backbone(carla_egg_path, town_id, rpc_port, job_id, ego_vehicle_fo
             sensors[f"rgb_{i}"].destroy()
             sensors[f"depth_{i}"].stop()
             sensors[f"depth_{i}"].destroy()
+            sensors[f"normals_{i}"].stop()
+            sensors[f"normals_{i}"].destroy()
+            sensors[f"semantic_{i}"].stop()
+            sensors[f"semantic_{i}"].destroy()
         exit()
 
 
